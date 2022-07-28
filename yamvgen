@@ -1,0 +1,315 @@
+set -e
+ATEXT="Artist";ASIZE="128";TSIZE="128";AGLOW1="black";AGLOW2="black";AFILL="black";AX="0";TX="0";B="2M";FIN="0"
+
+if [ ! -z "$1" ] && [[ ! "$1" = -* ]];then
+A="$1";shift;fi
+
+if [ -z "$A" ];then
+echo "Generate a Tube-friendly music video from the specified audio file.
+Usage: $(basename $0) [AUDIO] [PROFILE] [OPTIONS]
+
+AUDIO:
+
+	The audio file to generate the video for. The audio stream is copied to the output file without any conversions. If omitted, using 'in.wav'.
+
+PROFILE:
+
+	Specifies a custom configuration file to use. If omitted, using /etc/yamvgen.conf as default. You can still override any of the options with the arguments below.
+
+OPTIONS:
+
+	-bg         Background image on which everything else is overlaid. Its dimensions determine the size of the output video.
+	-ol         Overlay image to be composited on top of the background before rendering texts and waveform display. It must have the same dimensions as the background image.
+	-o          Name of the output video file. The container format is implicitly set by the file extension.
+	-c          Video codec for the output video. This parameter is passed directly to ffmpeg.
+	-b          Bitrate of the output video stream. This parameter is passed directly to ffmpeg.
+	-r          Frame rate of the output video. The higher the frame rate, the more stretched the waveform will be in order to stay in sync.
+	-fin        Length of fade in at the beginning in seconds.
+	-fout       Length of fade out at the end.
+
+Options for the displayed text:
+
+	-notext     Skips the text rendering step entirely.
+
+	-atext      Artist name to be displayed on the video. If omitted, defaulting to '$ATEXT'.
+	-ax         X position of the displayed artist name.
+	-ay         Y position of the displayed artist name.
+	-afont      Font family of the displayed artist name.
+	-asize      Font size of the displayed artist name.
+	-afill      Fill color of text.
+	-aglow1     1st color of glow effect.
+	-aglow2     2nd color of glow effect.
+
+	-ttext      Title to be displayed on the video. If omitted, the audio file name is used.
+	-tx         X position of the displayed title.
+	-ty         Y position of the displayed title.
+	-tfont      Font family of the displayed title.
+	-tsize      Font size of the displayed title.
+	-tfill      Fill color of text.
+	-tglow1     1st color of glow effect.
+	-tglow2     2nd color of glow effect.
+
+Options for the waveform display:
+
+	-nowave     Do not render waveform display at all.
+	-wy         Y position of the waveform display's zero level.
+	-walpha     Specifies a (preferably grayscale) image to be applied to the waveform display as an alpha mask. The height of this image sets the height of the wave at maximum amplitude. The width must be equal to the background image width.
+	-wblur      Make the waveform more visible on high resoultions by doing trickery.
+";exit 1;fi
+
+# Load profile
+
+PROFILE="/etc/yamvgen/yamvgen.conf"
+if [ ! -z "$1" ] && [[ ! "$1" = -* ]];then
+PROFILE="$1";shift;fi
+if [ ! -f "$PROFILE" ];then
+echo -e "\e[31m\e[1m$PROFILE: File not found\e[0m" >&2;exit 1;fi
+source "$PROFILE"
+
+# Parse command line
+
+while [[ $# -gt 0 ]];do
+case $1 in
+-o)
+	O="$2";shift;shift
+	;;
+-r)
+	R="$2";shift;shift
+	;;
+-b)
+	B="$2";shift;shift
+	;;
+-c)
+	C="$2";shift;shift
+	;;
+-bg)
+	BG="$2";shift;shift
+	;;
+-fin)
+	FIN="$2";shift;shift
+	;;
+-fout)
+	FOUT="$2";shift;shift
+	;;
+-notext)
+	NOTEXT="1";shift
+	;;
+-atext)
+	ATEXT="$2";shift;shift
+	;;
+-ax)
+	AX="$2";shift;shift
+	;;
+-ay)
+	AY="$2";shift;shift
+	;;
+-afont)
+	AFONT="$2";shift;shift
+	;;
+-asize)
+	ASIZE="$2";shift;shift
+	;;
+-afill)
+	AFILL="$2";shift;shift
+	;;
+-aglow1)
+	AGLOW1="$2";shift;shift
+	;;
+-aglow2)
+	AGLOW2="$2";shift;shift
+	;;
+-ttext)
+	TTEXT="$2";shift;shift
+	;;
+-tx)
+	TX="$2";shift;shift
+	;;
+-ty)
+	TY="$2";shift;shift
+	;;
+-tfont)
+	TFONT="$2";shift;shift
+	;;
+-tsize)
+	TSIZE="$2";shift;shift
+	;;
+-tfill)
+	TFILL="$2";shift;shift
+	;;
+-tglow1)
+	TGLOW1="$2";shift;shift
+	;;
+-tglow2)
+	TGLOW2="$2";shift;shift
+	;;
+-nowave)
+	NOWAVE="1";shift
+	;;
+-wy)
+	WY="$2";shift;shift
+	;;
+-walpha)
+	WALPHA="$2";shift;shift
+	;;
+-wblur)
+	WBLUR="1";shift
+	;;
+-ol)
+	OL="$2";shift;shift
+	;;
+*)
+	echo "Invalid option: $1";exit 1
+	;;
+esac;done
+
+# Sanity checks
+
+# Audio
+if [ ! -f "$A" ];then
+echo -e "\e[31m\e[1m$A: File not found\e[0m" >&2;exit 1;fi
+DURATION=$(ffprobe -v quiet -show_entries stream=duration -of default=nw=1:nk=1 "$A")
+
+# Background
+if [ -z "$BG" ];then
+BG="/usr/share/yamvgen/bg.png";echo "Background image not specified, defaulting to '$BG'";fi
+if [ ! -f "$BG" ];then
+echo -e "\e[31m\e[1m$BG: File not found\e[0m" >&2;exit 1;fi
+WIDTH=$(ffprobe -v quiet -show_entries stream=width -of default=nw=1:nk=1 "$BG")
+HEIGHT=$(ffprobe -v quiet -show_entries stream=height -of default=nw=1:nk=1 "$BG")
+
+# Fade in/out
+if [ -z "$FOUT" ];then
+FOUT="$FIN";fi
+if [ $(bc <<< "$DURATION < $FOUT") -eq "1" ];then
+echo "ERROR: Fade out time can not be longer than the video itself." >&2;exit 1;fi
+
+# Alpha mask
+if [ -z "$WALPHA" ];then
+WALPHA="/usr/share/yamvgen/walpha.png";echo "Alpha mask not specified, defaulting to '$WALPHA'";fi
+if [ ! -f "$WALPHA" ];then
+echo -e "\e[31m\e[1m$WALPHA: File not found\e[0m" >&2;exit 1;fi
+if [ ! $WIDTH == $(ffprobe -v quiet -show_entries stream=width -of default=nw=1:nk=1 "$WALPHA") ];then
+echo "ERROR: Background and alpha mask width must be equal." >&2;exit 1;fi
+
+# Overlay the overlay
+
+echo -n "Compositing background..."
+if [ -z "$OL" ];then
+echo " no overlay specified, skipping"
+else
+if [ ! $WIDTH == $(ffprobe -v quiet -show_entries stream=width -of default=nw=1:nk=1 "$OL") ];then
+echo "ERROR: Background and overlay image width must be equal." >&2;exit 1;fi
+if [ ! $HEIGHT == $(ffprobe -v quiet -show_entries stream=height -of default=nw=1:nk=1 "$OL") ];then
+echo "ERROR: Background and overlay image height must be equal." >&2;exit 1;fi
+convert "$BG" "$OL" -composite /tmp/yamvgen-tmp.png
+BG="/tmp/yamvgen-tmp.png"
+echo "done";fi
+
+# Render texts
+
+if [ -z "$NOTEXT" ];then # only if we really want it
+
+echo -n "Rendering artist name"
+
+if [ -z "$ATEXT" ];then
+ATEXT="Artist";fi
+if [ ! -z "$AFONT" ];then
+AFONT="-font $AFONT";fi
+
+echo -n "."
+convert -background black -fill $AGLOW1 $AFONT -pointsize $ASIZE label:"$ATEXT" -bordercolor black -border 30x30 -blur 0x5 -level 0%,40% /tmp/yamvgen-glow1.png
+echo -n "."
+convert -background black -fill $AGLOW2 $AFONT -pointsize $ASIZE label:"$ATEXT" -bordercolor black -border 30x30 -blur 0x16 -level 0%,20% /tmp/yamvgen-glow2.png
+echo -n "."
+convert /tmp/yamvgen-glow1.png /tmp/yamvgen-glow2.png -evaluate-sequence add /tmp/yamvgen-glow.png
+echo -n "."
+convert "$BG" /tmp/yamvgen-glow.png -geometry +$(($AX-30))+$(($AY-30)) -compose plus -composite /tmp/yamvgen-tmp.png
+echo -n "."
+convert -background transparent -fill $AFILL $AFONT -pointsize $ASIZE label:"$ATEXT" /tmp/yamvgen-t.png
+echo -n "."
+convert /tmp/yamvgen-tmp.png /tmp/yamvgen-t.png -geometry +$AX+$AY -composite /tmp/yamvgen-tmp0.png
+echo "done"
+
+echo -n "Rendering title"
+
+if [ -z "$TTEXT" ];then
+TTEXT=$(basename "${A%.*}");fi
+if [ ! -z "$TFONT" ];then
+AFONT="-font $TFONT";fi
+if [ -z "$TFONT" ];then
+TFONT="$AFONT";fi
+if [ -z "$TSIZE" ];then
+TSIZE="$ASIZE";fi
+if [ -z "$TFILL" ];then
+TFILL=$AFILL;fi
+if [ -z "$TGLOW1" ];then
+TGLOW1=$AGLOW1;fi
+if [ -z "$TGLOW2" ];then
+TGLOW2=$AGLOW2;fi
+
+echo -n "."
+convert -background black -fill $TGLOW1 $TFONT -pointsize $TSIZE label:"$TTEXT" -bordercolor black -border 30x30 -blur 0x5 -level 0%,40% /tmp/yamvgen-glow1.png
+echo -n "."
+convert -background black -fill $TGLOW2 $TFONT -pointsize $TSIZE label:"$TTEXT" -bordercolor black -border 30x30 -blur 0x16 -level 0%,25% /tmp/yamvgen-glow2.png
+echo -n "."
+convert /tmp/yamvgen-glow1.png /tmp/yamvgen-glow2.png -evaluate-sequence add /tmp/yamvgen-glow.png
+echo -n "."
+convert /tmp/yamvgen-tmp0.png /tmp/yamvgen-glow.png -geometry +$(($TX-30))+$(($TY-30)) -compose plus -composite /tmp/yamvgen-tmp.png
+echo -n "."
+convert -background transparent -fill $TFILL $TFONT -pointsize $TSIZE label:"$TTEXT" /tmp/yamvgen-t.png
+echo -n "."
+convert /tmp/yamvgen-tmp.png /tmp/yamvgen-t.png -geometry +$TX+$TY -composite /tmp/yamvgen-bg.png
+echo "done"
+
+rm /tmp/yamvgen-glow1.png /tmp/yamvgen-glow2.png /tmp/yamvgen-tmp0.png /tmp/yamvgen-glow.png /tmp/yamvgen-t.png
+BGFINAL="/tmp/yamvgen-bg.png"
+
+else
+BGFINAL=$BG;fi # or skip this whole thing if we don't want it
+
+# Push it all through
+
+if [ -z "$O" ];then
+O="yamvgen.mkv";echo "Output file not specified, defaulting to $O";fi
+
+if [ -z "$C" ];then
+C="h264";echo "Video codec not specified, defaulting to $C";fi
+
+if [ -z "$R" ];then
+R="60";echo "Frame rate not specified, defaulting to $R";fi
+
+FFCMD="ffmpeg -hide_banner -loglevel warning -stats"
+if [ ! $FIN == "0" ];then
+FFFIN=",fade=st=0:d=$FIN";fi
+if [ ! $FOUT == "0" ];then
+FFFOUT=",fade=t=out:st=$(bc <<< $DURATION-$FOUT):d=$FOUT";fi
+FFOUTPUT=" -map [outv] -map 0:a -c:v $C -c:a copy -t $DURATION -b:v $B $O"
+
+# If wave
+
+if [ -z "$NOWAVE" ];then
+
+if [ -z "$WY" ];then
+WY=$(($HEIGHT/2));fi
+WHEIGHT=$(ffprobe -v quiet -show_entries stream=height -of default=nw=1:nk=1 "$WALPHA")
+WAVEPOS=$(($WY-$WHEIGHT/2))
+if [ ! -z "$WBLUR" ];then
+WBLUR=",boxblur=lr=1,eq=brightness=1:contrast=3";fi
+
+$FFCMD -i "$A" -framerate $R -i "$BGFINAL" -framerate $R -i "$WALPHA" -filter_complex "
+[0:a]aresample=$(($WIDTH*$R)),
+showwaves=s='$WIDTH'x'$WHEIGHT':rate=$R:mode=p2p:draw=full:colors=white$WBLUR,
+split[wave0][wave1],
+[2:v][wave0]blend=all_mode=multiply[amask],
+[wave1][amask]alphamerge[wfinal],
+[1:v][wfinal]overlay=y='$WAVEPOS':format=rgb
+$FFFIN$FFFOUT[outv]"$FFOUTPUT
+
+# If not wave
+
+else
+$FFCMD -i "$A" -framerate $R -loop 1 -i "$BGFINAL" -filter_complex "[1:v]$FFFADE[outv]"$FFOUTPUT;fi
+
+# Clean up
+
+rm -f /tmp/yamvgen-tmp.png /tmp/yamvgen-bg.png
